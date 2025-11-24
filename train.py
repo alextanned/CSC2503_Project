@@ -44,6 +44,15 @@ def parse_args():
     # device
     parser.add_argument("--device", type=str, default=None,
                         help="Override device (e.g. 'cuda', 'cpu'). Default: auto-detect")
+    
+    parser.add_argument("--eval-every-epoch", action="store_true",
+                    help="Run VOC mAP evaluation at the end of every epoch")
+    parser.add_argument("--eval-final-only", action="store_true",
+                        help="Run only final mAP evaluation after training")
+
+    parser.add_argument("--input-size", type=int, default=480, help="Input image size (assumed square)")
+
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode, on small subset of data")
 
     return parser.parse_args()
 
@@ -59,6 +68,7 @@ def train_one_epoch(
     device,
     use_distill: bool,
     log_freq: int = 10,
+    debug: bool = False,
 ):
     student.train()
     running_loss = 0.0
@@ -67,6 +77,9 @@ def train_one_epoch(
 
     for i, (student_imgs, teacher_imgs, targets) in enumerate(pbar):
         step = epoch * len(loader) + i
+
+        if debug and i > 50:
+            break
 
         # move targets to device
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -188,7 +201,7 @@ def main():
     logger = ExperimentLogger(log_dir=experiment_dir)
 
     # data
-    train_loader, val_loader = get_loaders(batch_size=args.batch_size)
+    train_loader, val_loader = get_loaders(batch_size=args.batch_size, input_size=args.input_size)
 
     # teachers (only if distillation enabled)
     teachers = TeacherManager(device=device) if args.distill else None
@@ -200,6 +213,7 @@ def main():
         teacher_feature_dim=384,
         use_feature_distill=args.distill,
         use_logit_distill=args.distill,
+        input_size=args.input_size,
     ).to(device)
 
     # optimizer
@@ -226,6 +240,7 @@ def main():
             logger,
             device=device,
             use_distill=args.distill,
+            debug=args.debug,
         )
 
         print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}")
@@ -253,7 +268,7 @@ def main():
         if args.eval_every_epoch and not args.eval_final_only:
             print("\nRunning VOC evaluation...")
             iou_thresholds = [0.5 + 0.05 * i for i in range(10)]
-            mAPs, overall = evaluate(student, val_loader, device=device, iou_thresholds=iou_thresholds)
+            mAPs, overall = evaluate(student, val_loader, device=device, iou_thresholds=iou_thresholds, debug=args.debug)
 
             print(f"Epoch {epoch+1} VOC mAP@[0.50:0.95]: {overall:.4f}")
             logger.log_scalars({"Eval/mAP_all": overall}, epoch)

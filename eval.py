@@ -4,6 +4,7 @@ import os
 import numpy as np
 import torch
 from torchvision.ops import box_iou
+import tqdm
 
 from src.dataset import get_loaders, VOC_CLASSES
 from src.students import StudentDetector
@@ -113,15 +114,20 @@ def compute_ap_per_class(all_detections, all_annotations, num_classes, iou_thr=0
     return aps
 
 
-def evaluate(model, val_loader, device="cuda", iou_thresholds=None):
+def evaluate(model, val_loader, device="cuda", iou_thresholds=None, debug=False):
     model.eval()
     iou_thresholds = iou_thresholds or [0.5 + 0.05 * i for i in range(10)]
 
     all_detections = []
     all_annotations = []
 
+    pbar = tqdm.tqdm(val_loader, desc="Evaluating")
+
     with torch.no_grad():
-        for student_imgs, teacher_imgs, targets in val_loader:
+        for i, (student_imgs, teacher_imgs, targets) in enumerate(pbar):
+            if debug and i > 50:
+                break
+
             student_imgs = student_imgs.to(device)
             outputs, _, _ = model(student_imgs)
 
@@ -175,6 +181,8 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for evaluation")
     parser.add_argument("--device", type=str, default=None,
                         help="Override device (e.g., 'cuda', 'cpu'); default auto-detect")
+    parser.add_argument("--input-size", type=int, default=480, help="Input image size (assumed square)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode, on small subset of data")
     return parser.parse_args()
 
 
@@ -185,7 +193,7 @@ def main():
     print(f"Using device: {device}")
 
     # data (we only need val loader)
-    _, val_loader = get_loaders(batch_size=args.batch_size)
+    _, val_loader = get_loaders(batch_size=args.batch_size, input_size=args.input_size)
 
     # student model (no distillation taps needed during eval, but they don't hurt)
     model = StudentDetector(
@@ -194,6 +202,7 @@ def main():
         teacher_feature_dim=384,
         use_feature_distill=False,
         use_logit_distill=False,
+        input_size=args.input_size,
     ).to(device)
 
     # load weights
@@ -204,7 +213,7 @@ def main():
 
     # evaluate
     iou_thresholds = [0.5 + 0.05 * i for i in range(10)]
-    mAPs, overall = evaluate(model, val_loader, device=device, iou_thresholds=iou_thresholds)
+    mAPs, overall = evaluate(model, val_loader, device=device, iou_thresholds=iou_thresholds, debug=args.debug)
 
     print("\n===== VOC mAP Results =====")
     for thr, val in mAPs.items():

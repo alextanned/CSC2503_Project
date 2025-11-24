@@ -12,6 +12,7 @@ VOC_CLASSES = [
     "pottedplant", "sheep", "sofa", "train", "tvmonitor"
 ]
 
+
 class DistillationVOCDataset(VOCDetection):
     def __init__(self, root, year, image_set, transforms=None, fixed_size=(480, 480)):
         super().__init__(root, year=year, image_set=image_set, download=False)
@@ -26,7 +27,6 @@ class DistillationVOCDataset(VOCDetection):
         img, target = super().__getitem__(index)
 
         w_orig, h_orig = img.size
-        img_resized = img.resize(self.fixed_size)
         
         w_new, h_new = self.fixed_size
         w_scale = w_new / w_orig
@@ -55,44 +55,31 @@ class DistillationVOCDataset(VOCDetection):
 
         target_dict = {"boxes": boxes, "labels": labels}
 
-        student_img = img_resized
+        student_img = img
         if self.student_transforms:
-            student_img = self.student_transforms(img_resized)
+            student_img = self.student_transforms(student_img)
 
         # pass original image to teacher
         teacher_img = img
         if self.teacher_transforms:
-            teacher_img = self.teacher_transforms(img)
+            teacher_img = self.teacher_transforms(teacher_img)
 
         return student_img, teacher_img, target_dict
 
 def collate_fn(batch):
-    student_imgs = []
-    teacher_imgs = []
-    targets = []
+    student_imgs, teacher_imgs, targets = zip(*batch)
 
-    for s_img, t_img, target in batch:
-        student_imgs.append(s_img)
-        teacher_imgs.append(t_img)
-        targets.append(target)
-
-    # Now this stack will work because all s_imgs are 480x480
     student_imgs = torch.stack(student_imgs, dim=0)
-    
-    if isinstance(teacher_imgs[0], torch.Tensor) and teacher_imgs[0].ndim > 1:
-        try:
-            teacher_imgs = torch.stack(teacher_imgs, dim=0)
-        except:
-            pass
+    teacher_imgs = torch.stack(teacher_imgs, dim=0)
 
-    return student_imgs, teacher_imgs, targets
+    return student_imgs, teacher_imgs, list(targets)
 
-def get_loaders(batch_size=4):
+def get_loaders(batch_size=4, input_size=480):
     current_file_path = os.path.abspath(__file__)
     project_root = os.path.dirname(os.path.dirname(current_file_path))
     data_root = os.path.join(project_root, 'data')
 
-    basic_transform = T.Compose([T.ToTensor()])
+    basic_transform = T.Compose([T.Resize((input_size, input_size)), T.ToTensor()])
 
     train_ds_07 = DistillationVOCDataset(root=data_root, year='2007', image_set='trainval', transforms=basic_transform)
     train_ds_12 = DistillationVOCDataset(root=data_root, year='2012', image_set='trainval', transforms=basic_transform)
@@ -100,7 +87,7 @@ def get_loaders(batch_size=4):
     
     train_ds = torch.utils.data.ConcatDataset([train_ds_07, train_ds_12])
     
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=4)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4)
     
     return train_loader, val_loader

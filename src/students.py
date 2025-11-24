@@ -25,25 +25,52 @@ class FeatureAdapter(nn.Module):
 class ViTFeatureWrapper(nn.Module):
     """
     Wraps a ViT to output 2D feature maps (B, C, H, W) instead of a sequence.
-    Assumes square inputs and patch-based ViT (e.g., vit_tiny_patch16_224).
+    Automatically resizes input to the ViT's expected img_size (e.g., 224x224),
+    so it plays nicely with FasterRCNN's internal transforms (which may use 800x800).
     """
     def __init__(self, vit_model):
         super().__init__()
         self.vit = vit_model
+
         # timm ViTs usually expose this
         self.embed_dim = getattr(vit_model, "embed_dim", vit_model.num_features)
 
+        # expected input size, e.g. (224, 224)
+        # timm patch_embed stores img_size as a tuple
+        if hasattr(vit_model, "patch_embed") and hasattr(vit_model.patch_embed, "img_size"):
+            img_size = vit_model.patch_embed.img_size
+            # can be int or (H, W)
+            if isinstance(img_size, (tuple, list)):
+                self.img_size = (img_size[0], img_size[1])
+            else:
+                self.img_size = (img_size, img_size)
+        else:
+            # fallback
+            self.img_size = (224, 224)
+
     def forward(self, x):
-        # forward_features for timm ViT returns (B, N+1, C) or a dict; handle both
+        # x comes from FasterRCNN's transform, often (B, 3, 800, 800)
+        B, C, H, W = x.shape
+
+        # 1) Resize to the ViT's expected size (e.g. 224x224)
+        if (H, W) != self.img_size:
+            x = F.interpolate(
+                x,
+                size=self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        # 2) Forward through timm ViT
         out = self.vit.forward_features(x)
+        # out is usually (B, N+1, C) or a dict
+
         if isinstance(out, dict):
-            # common timm behavior: out["x"] or out["last"]
             if "x" in out:
                 tokens = out["x"]
             elif "last" in out:
                 tokens = out["last"]
             else:
-                # fallback: first value in dict
                 tokens = next(iter(out.values()))
         else:
             tokens = out
@@ -51,10 +78,14 @@ class ViTFeatureWrapper(nn.Module):
         # Remove CLS token at index 0 -> (B, N, C)
         tokens = tokens[:, 1:, :]
         B, N, C = tokens.shape
-        H = W = int(N ** 0.5)
 
-        tokens = tokens.permute(0, 2, 1).contiguous().reshape(B, C, H, W)
+        # infer spatial grid (assume square)
+        H_feat = W_feat = int(N ** 0.5)
+
+        # reshape to (B, C, H_feat, W_feat)
+        tokens = tokens.permute(0, 2, 1).contiguous().reshape(B, C, H_feat, W_feat)
         return tokens
+
 
 
 class BackboneWithHook(nn.Module):
@@ -139,9 +170,11 @@ class StudentDetector(nn.Module):
         teacher_feature_dim: int = 384,
         use_feature_distill: bool = True,
         use_logit_distill: bool = True,
+        input_size: int = 480, 
     ):
         super().__init__()
         self.model_type = model_type
+        self.input_size = input_size
         print(f"[StudentDetector] Using backbone: {model_type}")
 
         # 1. backbone
@@ -168,6 +201,8 @@ class StudentDetector(nn.Module):
             num_classes=num_classes + 1,
             rpn_anchor_generator=anchor_generator,
             box_roi_pool=roi_pooler,
+            min_size=self.input_size,
+            max_size=self.input_size,
         )
 
         # 3. distillation taps
