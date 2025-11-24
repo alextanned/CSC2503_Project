@@ -13,11 +13,11 @@ VOC_CLASSES = [
 ]
 
 class DistillationVOCDataset(VOCDetection):
-    def __init__(self, root, year, image_set, transforms=None, teacher_transforms=None, fixed_size=(480, 480)):
+    def __init__(self, root, year, image_set, transforms=None, fixed_size=(480, 480)):
         super().__init__(root, year=year, image_set=image_set, download=False)
         
         self.student_transforms = transforms
-        self.teacher_transforms = teacher_transforms
+        self.teacher_transforms = transforms
         self.fixed_size = fixed_size # Target size (H, W)
         
         self.class_to_ind = dict(zip(VOC_CLASSES, range(len(VOC_CLASSES))))
@@ -60,7 +60,7 @@ class DistillationVOCDataset(VOCDetection):
             student_img = self.student_transforms(img_resized)
 
         # pass original image to teacher
-        teacher_img = torch.zeros(1) 
+        teacher_img = img
         if self.teacher_transforms:
             teacher_img = self.teacher_transforms(img)
 
