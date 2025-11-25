@@ -155,7 +155,7 @@ def evaluate(model, val_loader, device="cuda", iou_thresholds=None, debug=False)
                 all_annotations.append(
                     {
                         "boxes": t["boxes"].to(device),
-                        "labels": t["labels"].to(device),
+                        "labels": t["labels"].to(device) - 1,  # shift to 0-based class indices
                     }
                 )
 

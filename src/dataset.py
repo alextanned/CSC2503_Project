@@ -51,7 +51,7 @@ class DistillationVOCDataset(VOCDetection):
             labels.append(self.class_to_ind[obj['name']])
 
         boxes = torch.tensor(boxes, dtype=torch.float32)
-        labels = torch.tensor(labels, dtype=torch.long)
+        labels = torch.tensor(labels, dtype=torch.long) + 1 # +1 for background class
 
         target_dict = {"boxes": boxes, "labels": labels}
 
