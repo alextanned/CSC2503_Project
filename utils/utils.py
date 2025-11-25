@@ -16,15 +16,18 @@ def tensor_to_numpy(img_tensor):
     img = np.clip(img, 0, 1)
     # Convert to uint8 for OpenCV
     img = (img * 255).astype(np.uint8)
-    return img.copy() # Copy required for cv2 drawing
+    return img.copy()  # Copy required for cv2 drawing
 
 def plot_prediction_batch(images, targets, predictions=None, limit=4):
     """
     Draws Ground Truth (Green) and Predictions (Red) on images.
+    Assumes:
+      - GT labels: 1..20  (0 is background, not used)
+      - Pred labels: 0..20 (0 = background, 1..20 = classes)
+      - VOC_CLASSES indexed 0..19
     """
     canvas_list = []
     
-    # Loop through batch
     for i in range(min(len(images), limit)):
         img = tensor_to_numpy(images[i])
         
@@ -34,10 +37,26 @@ def plot_prediction_batch(images, targets, predictions=None, limit=4):
             gt_labels = targets[i]['labels'].cpu().numpy()
             
             for box, label_idx in zip(gt_boxes, gt_labels):
+                # label_idx is 1..20; skip anything invalid just in case
+                if label_idx <= 0:
+                    continue
+                cls_idx = int(label_idx) - 1  # map to 0..19 for VOC_CLASSES
+                if cls_idx < 0 or cls_idx >= len(VOC_CLASSES):
+                    cls_name = "Bg"
+                else:
+                    cls_name = VOC_CLASSES[cls_idx]
+
                 x1, y1, x2, y2 = box.astype(int)
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = VOC_CLASSES[label_idx] if label_idx < len(VOC_CLASSES) else "Bg"
-                cv2.putText(img, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.putText(
+                    img,
+                    cls_name,
+                    (x1, max(y1 - 5, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                )
 
         # 2. Draw Predictions (Red) if provided
         if predictions is not None:
@@ -47,11 +66,31 @@ def plot_prediction_batch(images, targets, predictions=None, limit=4):
             
             # Filter by confidence
             keep = pred_scores > 0.3
-            for box, label_idx, score in zip(pred_boxes[keep], pred_labels[keep], pred_scores[keep]):
+            pred_boxes = pred_boxes[keep]
+            pred_scores = pred_scores[keep]
+            pred_labels = pred_labels[keep]
+
+            for box, label_idx, score in zip(pred_boxes, pred_labels, pred_scores):
+                # pred labels: 0 = background, 1..20 = classes
+                if label_idx <= 0:
+                    continue  # skip background
+                cls_idx = int(label_idx) - 1  # 1..20 -> 0..19
+                if cls_idx < 0 or cls_idx >= len(VOC_CLASSES):
+                    cls_name = "Bg"
+                else:
+                    cls_name = VOC_CLASSES[cls_idx]
+
                 x1, y1, x2, y2 = box.astype(int)
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                label = f"{VOC_CLASSES[label_idx]}: {score:.2f}"
-                cv2.putText(img, label, (x1, y2+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                cv2.putText(
+                    img,
+                    f"{cls_name}: {score:.2f}",
+                    (x1, y2 + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 255),
+                    1,
+                )
         
         # Convert back to Channel First for TensorBoard
         canvas_list.append(torch.from_numpy(img).permute(2, 0, 1))
