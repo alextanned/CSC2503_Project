@@ -18,17 +18,25 @@ def tensor_to_numpy(img_tensor):
     img = (img * 255).astype(np.uint8)
     return img.copy()  # Copy required for cv2 drawing
 
-def plot_prediction_batch(images, targets, predictions=None, limit=4):
+def plot_prediction_batch(
+    images,
+    targets,
+    predictions=None,
+    limit=4,
+    score_thresh=0.3,
+):
     """
     Draws Ground Truth (Green) and Predictions (Red) on images.
     Assumes:
       - GT labels: 1..20  (0 is background, not used)
       - Pred labels: 0..20 (0 = background, 1..20 = classes)
       - VOC_CLASSES indexed 0..19
+    Returns: (N, 3, H, W) tensor for logging/saving.
     """
     canvas_list = []
+    n = min(len(images), limit)
     
-    for i in range(min(len(images), limit)):
+    for i in range(n):
         img = tensor_to_numpy(images[i])
         
         # 1. Draw Ground Truth (Green)
@@ -37,14 +45,10 @@ def plot_prediction_batch(images, targets, predictions=None, limit=4):
             gt_labels = targets[i]['labels'].cpu().numpy()
             
             for box, label_idx in zip(gt_boxes, gt_labels):
-                # label_idx is 1..20; skip anything invalid just in case
                 if label_idx <= 0:
                     continue
-                cls_idx = int(label_idx) - 1  # map to 0..19 for VOC_CLASSES
-                if cls_idx < 0 or cls_idx >= len(VOC_CLASSES):
-                    cls_name = "Bg"
-                else:
-                    cls_name = VOC_CLASSES[cls_idx]
+                cls_idx = int(label_idx) - 1  # map 1..20 -> 0..19
+                cls_name = VOC_CLASSES[cls_idx] if 0 <= cls_idx < len(VOC_CLASSES) else "Bg"
 
                 x1, y1, x2, y2 = box.astype(int)
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -64,21 +68,16 @@ def plot_prediction_batch(images, targets, predictions=None, limit=4):
             pred_scores = predictions[i]['scores'].detach().cpu().numpy()
             pred_labels = predictions[i]['labels'].detach().cpu().numpy()
             
-            # Filter by confidence
-            keep = pred_scores > 0.3
+            keep = pred_scores > score_thresh
             pred_boxes = pred_boxes[keep]
             pred_scores = pred_scores[keep]
             pred_labels = pred_labels[keep]
 
             for box, label_idx, score in zip(pred_boxes, pred_labels, pred_scores):
-                # pred labels: 0 = background, 1..20 = classes
                 if label_idx <= 0:
                     continue  # skip background
                 cls_idx = int(label_idx) - 1  # 1..20 -> 0..19
-                if cls_idx < 0 or cls_idx >= len(VOC_CLASSES):
-                    cls_name = "Bg"
-                else:
-                    cls_name = VOC_CLASSES[cls_idx]
+                cls_name = VOC_CLASSES[cls_idx] if 0 <= cls_idx < len(VOC_CLASSES) else "Bg"
 
                 x1, y1, x2, y2 = box.astype(int)
                 label_idx = label_idx - 1
@@ -93,7 +92,6 @@ def plot_prediction_batch(images, targets, predictions=None, limit=4):
                     1,
                 )
         
-        # Convert back to Channel First for TensorBoard
         canvas_list.append(torch.from_numpy(img).permute(2, 0, 1))
         
     return torch.stack(canvas_list)
