@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
     parser.add_argument("--epochs", type=int, default=30, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--warmup-lr", type=float, default=1e-2, help="Higher learning rate for fast 1-epoch training")
 
     # logging / paths
     parser.add_argument("--run-name", type=str, default=None,
@@ -216,8 +217,10 @@ def main():
         input_size=args.input_size,
     ).to(device)
 
-    # optimizer
-    optimizer = optim.Adam(student.parameters(), lr=args.lr)
+    # optimizer - use higher LR for 1-epoch training if specified
+    effective_lr = args.warmup_lr if args.epochs == 1 else args.lr
+    optimizer = optim.Adam(student.parameters(), lr=effective_lr)
+    print(f"Using learning rate: {effective_lr}")
 
     # loss
     if args.distill:
