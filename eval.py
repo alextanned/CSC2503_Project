@@ -121,6 +121,9 @@ def evaluate(model, val_loader, device="cuda", iou_thresholds=None, debug=False)
 
     all_detections = []
     all_annotations = []
+    
+    # Check if model is in FP16
+    is_fp16 = next(model.parameters()).dtype == torch.float16
 
     pbar = tqdm.tqdm(val_loader, desc="Evaluating")
 
@@ -130,6 +133,11 @@ def evaluate(model, val_loader, device="cuda", iou_thresholds=None, debug=False)
                 break
 
             student_imgs = student_imgs.to(device)
+            
+            # Convert inputs to FP16 if model is FP16
+            if is_fp16:
+                student_imgs = student_imgs.half()
+            
             outputs, _, _ = model(student_imgs)
 
             for o, t in zip(outputs, targets):
@@ -184,6 +192,8 @@ def parse_args():
     parser.add_argument("--backbone", type=str, default="resnet18",
                         choices=["resnet18", "mobilenet_v3_small", "vit_tiny"],
                         help="Backbone architecture used in the student model")
+    parser.add_argument("--fp16", action="store_true",
+                        help="Load a FP16 (half precision) model")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for evaluation")
     parser.add_argument("--device", type=str, default=None,
                         help="Override device (e.g., 'cuda', 'cpu'); default auto-detect")
@@ -225,7 +235,17 @@ def main():
 
     # load weights
     assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"
-    state_dict = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+        if checkpoint.get('fp16', False):
+            print(f"Loading FP16 (half precision) model")
+            model = model.half()
+    else:
+        state_dict = checkpoint
+    
     model.load_state_dict(state_dict)
     print(f"Loaded checkpoint from {args.checkpoint}")
 

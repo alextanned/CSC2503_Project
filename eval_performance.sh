@@ -18,6 +18,7 @@ INPUT_SIZE=480
 DINO_CHECKPOINT=$(ls -t checkpoints/teacher_dino_*/teacher_latest.pth 2>/dev/null | head -1)
 CLIP_CHECKPOINT=$(ls -t checkpoints/teacher_clip_*/teacher_latest.pth 2>/dev/null | head -1)
 RESNET_CHECKPOINT=$(ls -t checkpoints/resnet18_baseline/student_latest.pth 2>/dev/null | head -1)
+RESNET_FP16_CHECKPOINT=$(ls -t checkpoints/resnet18_baseline/student_fp16.pth 2>/dev/null | head -1)
 MOBILENET_CHECKPOINT=$(ls -t checkpoints/mobilenet_baseline/student_latest.pth 2>/dev/null | head -1)
 VIT_CHECKPOINT=$(ls -t checkpoints/vit_tiny_*/student_latest.pth 2>/dev/null | head -1)
 
@@ -104,11 +105,33 @@ else
     echo "Skipping ResNet18: No checkpoint found"
 fi
 
+# Evaluate ResNet18 FP16
+if [ -n "$RESNET_FP16_CHECKPOINT" ]; then
+    echo ""
+    echo "=========================================="
+    echo "4. Evaluating ResNet18 FP16 (Half Precision)"
+    echo "=========================================="
+    echo "Checkpoint: $RESNET_FP16_CHECKPOINT"
+    echo ""
+    
+    python eval_performance.py \
+        --backbone resnet18 \
+        --checkpoint "$RESNET_FP16_CHECKPOINT" \
+        --fp16 \
+        --batch-size ${BATCH_SIZE} \
+        --device ${DEVICE} \
+        --input-size ${INPUT_SIZE} \
+        --num-timing-batches 50
+else
+    echo ""
+    echo "Skipping ResNet18 FP16: No checkpoint found"
+fi
+
 # Evaluate MobileNet Baseline
 if [ -n "$MOBILENET_CHECKPOINT" ]; then
     echo ""
     echo "=========================================="
-    echo "4. Evaluating MobileNet Baseline"
+    echo "5. Evaluating MobileNet Baseline"
     echo "=========================================="
     echo "Checkpoint: $MOBILENET_CHECKPOINT"
     echo ""
@@ -129,7 +152,7 @@ fi
 if [ -n "$VIT_CHECKPOINT" ]; then
     echo ""
     echo "=========================================="
-    echo "5. Evaluating ViT Tiny"
+    echo "6. Evaluating ViT Tiny"
     echo "=========================================="
     echo "Checkpoint: $VIT_CHECKPOINT"
     echo ""

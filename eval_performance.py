@@ -18,12 +18,17 @@ def measure_inference_time(model, val_loader, device="cuda", warmup_batches=5, n
     times = []
     total_images = 0
     
+    # Check if model is in FP16
+    is_fp16 = next(model.parameters()).dtype == torch.float16
+    
     with torch.no_grad():
         # Warmup
         for i, (student_imgs, _, _) in enumerate(val_loader):
             if i >= warmup_batches:
                 break
             student_imgs = student_imgs.to(device)
+            if is_fp16:
+                student_imgs = student_imgs.half()
             _ = model(student_imgs)
         
         # Actual timing
@@ -32,6 +37,8 @@ def measure_inference_time(model, val_loader, device="cuda", warmup_batches=5, n
                 break
                 
             student_imgs = student_imgs.to(device)
+            if is_fp16:
+                student_imgs = student_imgs.half()
             batch_size = student_imgs.shape[0]
             
             torch.cuda.synchronize() if device == "cuda" else None
@@ -75,6 +82,8 @@ def parse_args():
     parser.add_argument("--backbone", type=str, default="resnet18",
                         choices=["resnet18", "mobilenet_v3_small", "vit_tiny"],
                         help="Backbone architecture used in the student model")
+    parser.add_argument("--fp16", action="store_true",
+                        help="Load a FP16 (half precision) model")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for evaluation")
     parser.add_argument("--device", type=str, default=None,
                         help="Override device (e.g., 'cuda', 'cpu'); default auto-detect")
@@ -117,7 +126,22 @@ def main():
         model_name = args.backbone
 
     assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"
-    state_dict = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    
+    # Handle different checkpoint formats and FP16
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+        if checkpoint.get('fp16', False) or args.fp16:
+            print(f"Loading FP16 (half precision) model")
+            model = model.half()
+            model_name += "_fp16"
+    else:
+        state_dict = checkpoint
+        if args.fp16:
+            print(f"Converting model to FP16")
+            model = model.half()
+            model_name += "_fp16"
+    
     model.load_state_dict(state_dict)
     print(f"Loaded checkpoint from {args.checkpoint}")
 

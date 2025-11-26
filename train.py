@@ -29,7 +29,7 @@ def parse_args():
 
     # core experiment knobs
     parser.add_argument("--backbone", type=str, default="resnet18",
-                        choices=["resnet18", "mobilenet_v3_small", "vit_tiny"],
+                        choices=["resnet18", "resnet18_quantized", "mobilenet_v3_small", "vit_tiny"],
                         help="Student backbone architecture")
     parser.add_argument("--distill", action="store_true",
                         help="Enable knowledge distillation (DINO features + CLIP logits)")
@@ -78,9 +78,11 @@ def train_one_epoch(
     is_teacher_detector: bool = False,
     log_freq: int = 10,
     debug: bool = False,
+    use_fp16: bool = False,
 ):
     student.train()
     running_loss = 0.0
+    scaler = torch.cuda.amp.GradScaler() if use_fp16 else None
 
     pbar = tqdm(loader, desc=f"Epoch {epoch+1} [Train]")
 
@@ -96,12 +98,22 @@ def train_one_epoch(
 
         # Teacher detector mode (simpler training loop)
         if is_teacher_detector:
-            loss_dict, _, _ = student(student_imgs, targets=targets)
-            losses = sum(loss for loss in loss_dict.values())
-            
-            optimizer.zero_grad()
-            losses.backward()
-            optimizer.step()
+            if use_fp16:
+                with torch.cuda.amp.autocast():
+                    loss_dict, _, _ = student(student_imgs, targets=targets)
+                    losses = sum(loss for loss in loss_dict.values())
+                
+                optimizer.zero_grad()
+                scaler.scale(losses).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss_dict, _, _ = student(student_imgs, targets=targets)
+                losses = sum(loss for loss in loss_dict.values())
+                
+                optimizer.zero_grad()
+                losses.backward()
+                optimizer.step()
             
             running_loss += losses.item()
             
@@ -131,22 +143,41 @@ def train_one_epoch(
             dino_features = None
             clip_logits = None
 
-        # 1) student forward
-        loss_dict, student_features, student_logits = student(student_imgs, targets=targets)
+        # 1) student forward with optional FP16
+        if use_fp16:
+            with torch.cuda.amp.autocast():
+                loss_dict, student_features, student_logits = student(student_imgs, targets=targets)
+                
+                # 2) total loss
+                total_loss, det_loss, feat_loss, logit_loss = loss_fn(
+                    loss_dict,
+                    student_features,
+                    dino_features,
+                    student_logits,
+                    clip_logits,
+                )
+            
+            # 3) optimization with gradient scaling
+            optimizer.zero_grad()
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss_dict, student_features, student_logits = student(student_imgs, targets=targets)
 
-        # 2) total loss
-        total_loss, det_loss, feat_loss, logit_loss = loss_fn(
-            loss_dict,
-            student_features,
-            dino_features,
-            student_logits,
-            clip_logits,
-        )
+            # 2) total loss
+            total_loss, det_loss, feat_loss, logit_loss = loss_fn(
+                loss_dict,
+                student_features,
+                dino_features,
+                student_logits,
+                clip_logits,
+            )
 
-        # 3) optimization
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
+            # 3) optimization
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
 
         running_loss += total_loss.item()
 
@@ -295,6 +326,9 @@ def main():
         use_distill = args.distill
         is_teacher_detector = False
 
+    # Enable FP16 for resnet18_quantized
+    use_fp16 = (args.backbone == "resnet18_quantized") if not args.train_teacher_detector else False
+    
     # training loop
     for epoch in range(args.epochs):
         # Train for one epoch
@@ -310,6 +344,7 @@ def main():
             use_distill=use_distill,
             is_teacher_detector=is_teacher_detector,
             debug=args.debug,
+            use_fp16=use_fp16,
         )
 
         print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}")

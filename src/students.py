@@ -136,6 +136,16 @@ def build_backbone(model_type: str = "resnet18", pretrained: bool = True):
         # strip avgpool + fc
         body = nn.Sequential(*list(base.children())[:-2])
         out_channels = 512
+    
+    elif model_type == "resnet18_quantized":
+        # Use regular ResNet18 with FP16/half precision for faster training
+        print("[StudentDetector] Using ResNet18 backbone with FP16 support...")
+        base = torchvision.models.resnet18(
+            weights=torchvision.models.ResNet18_Weights.DEFAULT if pretrained else None
+        )
+        # strip avgpool + fc
+        body = nn.Sequential(*list(base.children())[:-2])
+        out_channels = 512
 
     elif model_type in ["mobilenet", "mobilenet_v3_small", "mobilenet-small"]:
         base = torchvision.models.mobilenet_v3_small(
