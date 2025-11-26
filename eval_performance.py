@@ -7,6 +7,7 @@ import torch
 
 from src.dataset import get_loaders
 from src.students import StudentDetector
+from src.teacher_detector import TeacherDetector
 from eval import evaluate
 
 
@@ -64,8 +65,13 @@ def count_parameters(model):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate VOC mAP and runtime for a trained student detector")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to student .pth checkpoint")
+    parser = argparse.ArgumentParser(description="Evaluate VOC mAP and runtime for a trained detector")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pth checkpoint")
+    parser.add_argument("--eval-teacher-detector", action="store_true",
+                        help="Evaluate a teacher detector (DINO/CLIP with detection head)")
+    parser.add_argument("--teacher-type", type=str, default="dino",
+                        choices=["dino", "clip", "both"],
+                        help="Teacher backbone type (for --eval-teacher-detector)")
     parser.add_argument("--backbone", type=str, default="resnet18",
                         choices=["resnet18", "mobilenet_v3_small", "vit_tiny"],
                         help="Backbone architecture used in the student model")
@@ -74,6 +80,7 @@ def parse_args():
                         help="Override device (e.g., 'cuda', 'cpu'); default auto-detect")
     parser.add_argument("--num-timing-batches", type=int, default=50,
                         help="Number of batches to use for timing measurements")
+    parser.add_argument("--input-size", type=int, default=480, help="Input image size")
     return parser.parse_args()
 
 
@@ -84,16 +91,30 @@ def main():
     print(f"Using device: {device}")
 
     # Load data
-    _, val_loader = get_loaders(batch_size=args.batch_size)
+    _, val_loader = get_loaders(batch_size=args.batch_size, input_size=args.input_size)
 
-    # Load model
-    model = StudentDetector(
-        model_type=args.backbone,
-        num_classes=20,
-        teacher_feature_dim=384,
-        use_feature_distill=False,
-        use_logit_distill=False,
-    ).to(device)
+    # Load model based on type
+    if args.eval_teacher_detector:
+        print(f"Loading teacher detector ({args.teacher_type})...")
+        model = TeacherDetector(
+            teacher_type=args.teacher_type,
+            num_classes=20,
+            freeze_backbone=True,
+            input_size=args.input_size,
+            device=device
+        ).to(device)
+        model_name = f"teacher_{args.teacher_type}"
+    else:
+        print(f"Loading student detector ({args.backbone})...")
+        model = StudentDetector(
+            model_type=args.backbone,
+            num_classes=20,
+            teacher_feature_dim=384,
+            use_feature_distill=False,
+            use_logit_distill=False,
+            input_size=args.input_size,
+        ).to(device)
+        model_name = args.backbone
 
     assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"
     state_dict = torch.load(args.checkpoint, map_location=device)
@@ -103,7 +124,7 @@ def main():
     # Model size
     total_params, trainable_params = count_parameters(model)
     print(f"\n{'='*60}")
-    print(f"Model: {args.backbone}")
+    print(f"Model: {model_name}")
     print(f"Total Parameters: {total_params:,}")
     print(f"Trainable Parameters: {trainable_params:,}")
     print(f"Model Size: {total_params * 4 / (1024**2):.2f} MB (assuming float32)")
@@ -124,27 +145,13 @@ def main():
     print(f"Tested on {perf_metrics['total_images']} images")
     print(f"{'='*60}\n")
 
-    # mAP evaluation
-    print("Evaluating mAP...")
-    iou_thresholds = [0.5 + 0.05 * i for i in range(10)]
-    mAPs, overall = evaluate(model, val_loader, device=device, iou_thresholds=iou_thresholds)
-
-    print(f"\n{'='*60}")
-    print("VOC mAP RESULTS")
-    print(f"{'='*60}")
-    for thr, val in mAPs.items():
-        print(f"mAP@IoU={thr:.2f}: {val:.4f}")
-    print(f"\nOverall mAP@[0.50:0.95]: {overall:.4f}")
-    print(f"{'='*60}\n")
-
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"Backbone: {args.backbone}")
+    print(f"Model: {model_name}")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Parameters: {total_params:,}")
-    print(f"mAP@[0.50:0.95]: {overall:.4f}")
     print(f"Inference Speed: {perf_metrics['avg_time_per_image_ms']:.2f} ms/image ({perf_metrics['fps']:.2f} FPS)")
     print(f"{'='*60}\n")
 

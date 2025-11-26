@@ -81,6 +81,7 @@ def plot_prediction_batch(images, targets, predictions=None, limit=4):
                     cls_name = VOC_CLASSES[cls_idx]
 
                 x1, y1, x2, y2 = box.astype(int)
+                label_idx = label_idx - 1
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(
                     img,

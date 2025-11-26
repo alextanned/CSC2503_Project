@@ -8,6 +8,7 @@ import tqdm
 
 from src.dataset import get_loaders, VOC_CLASSES
 from src.students import StudentDetector
+from src.teacher_detector import TeacherDetector
 
 
 def voc_ap(rec, prec):
@@ -124,7 +125,7 @@ def evaluate(model, val_loader, device="cuda", iou_thresholds=None, debug=False)
     pbar = tqdm.tqdm(val_loader, desc="Evaluating")
 
     with torch.no_grad():
-        for i, (student_imgs, teacher_imgs, targets) in enumerate(pbar):
+        for i, (student_imgs, teacher_imgs, targets) in tqdm.tqdm(enumerate(pbar)):
             if debug and i > 50:
                 break
 
@@ -175,6 +176,11 @@ def evaluate(model, val_loader, device="cuda", iou_thresholds=None, debug=False)
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate VOC mAP for a trained student detector")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to student .pth checkpoint")
+    parser.add_argument("--eval-teacher-detector", action="store_true",
+                        help="Evaluate a teacher detector (DINO/CLIP with detection head)")
+    parser.add_argument("--teacher-type", type=str, default="dino",
+                        choices=["dino", "clip", "both"],
+                        help="Teacher backbone type (for --eval-teacher-detector)")
     parser.add_argument("--backbone", type=str, default="resnet18",
                         choices=["resnet18", "mobilenet_v3_small", "vit_tiny"],
                         help="Backbone architecture used in the student model")
@@ -195,15 +201,27 @@ def main():
     # data (we only need val loader)
     _, val_loader = get_loaders(batch_size=args.batch_size, input_size=args.input_size)
 
-    # student model (no distillation taps needed during eval, but they don't hurt)
-    model = StudentDetector(
-        model_type=args.backbone,
-        num_classes=20,
-        teacher_feature_dim=384,
-        use_feature_distill=False,
-        use_logit_distill=False,
-        input_size=args.input_size,
-    ).to(device)
+    # Load model based on type
+    if args.eval_teacher_detector:
+        print(f"Loading teacher detector ({args.teacher_type})...")
+        model = TeacherDetector(
+            teacher_type=args.teacher_type,
+            num_classes=20,
+            freeze_backbone=True,
+            input_size=args.input_size,
+            device=device
+        ).to(device)
+    else:
+        print(f"Loading student detector ({args.backbone})...")
+        # student model (no distillation taps needed during eval, but they don't hurt)
+        model = StudentDetector(
+            model_type=args.backbone,
+            num_classes=20,
+            teacher_feature_dim=384,
+            use_feature_distill=False,
+            use_logit_distill=False,
+            input_size=args.input_size,
+        ).to(device)
 
     # load weights
     assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"

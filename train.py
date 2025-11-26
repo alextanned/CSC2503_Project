@@ -10,6 +10,7 @@ from tqdm import tqdm
 from src.dataset import get_loaders
 from src.teachers import TeacherManager
 from src.students import StudentDetector
+from src.teacher_detector import TeacherDetector
 from src.loss import DistillationLoss
 from utils.logger import ExperimentLogger
 from utils.utils import plot_prediction_batch, plot_feature_heatmap
@@ -18,6 +19,13 @@ from eval import evaluate
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train student detector with optional distillation on Pascal VOC")
+
+    # Teacher detector training
+    parser.add_argument("--train-teacher-detector", action="store_true",
+                        help="Train a detector using DINO/CLIP backbone with detection head")
+    parser.add_argument("--teacher-type", type=str, default="dino",
+                        choices=["dino", "clip", "both"],
+                        help="Teacher backbone type (dino, clip, or both)")
 
     # core experiment knobs
     parser.add_argument("--backbone", type=str, default="resnet18",
@@ -34,7 +42,6 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
     parser.add_argument("--epochs", type=int, default=30, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--warmup-lr", type=float, default=1e-2, help="Higher learning rate for fast 1-epoch training")
 
     # logging / paths
     parser.add_argument("--run-name", type=str, default=None,
@@ -68,6 +75,7 @@ def train_one_epoch(
     logger,
     device,
     use_distill: bool,
+    is_teacher_detector: bool = False,
     log_freq: int = 10,
     debug: bool = False,
 ):
@@ -86,7 +94,30 @@ def train_one_epoch(
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         student_imgs = student_imgs.to(device)
 
-        # teacher images (if using distillation)
+        # Teacher detector mode (simpler training loop)
+        if is_teacher_detector:
+            loss_dict, _, _ = student(student_imgs, targets=targets)
+            losses = sum(loss for loss in loss_dict.values())
+            
+            optimizer.zero_grad()
+            losses.backward()
+            optimizer.step()
+            
+            running_loss += losses.item()
+            
+            if i % log_freq == 0:
+                metrics = {"Loss/Total": losses.item()}
+                for key, value in loss_dict.items():
+                    metrics[f"Loss/{key}"] = value.item()
+                logger.log_scalars(metrics, step)
+            
+            pbar.set_postfix({
+                "Total": f"{losses.item():.3f}",
+                "Cls": f"{loss_dict.get('loss_classifier', 0):.3f}",
+            })
+            continue
+
+        # Student training with optional distillation
         if use_distill:
             if not isinstance(teacher_imgs, torch.Tensor) or teacher_imgs.ndim < 4:
                 teacher_imgs = student_imgs
@@ -147,6 +178,7 @@ def validate_and_visualize(
     logger,
     device,
     use_distill: bool,
+    is_teacher_detector: bool = False,
 ):
     student.eval()
     print("Running Validation & Visualization...")
@@ -159,12 +191,18 @@ def validate_and_visualize(
 
     student_imgs = student_imgs.to(device)
 
-    if not isinstance(teacher_imgs, torch.Tensor) or teacher_imgs.ndim < 4:
-        teacher_imgs = student_imgs
-    teacher_imgs = teacher_imgs.to(device)
+    if is_teacher_detector:
+        # Teacher detector: simple forward pass
+        detections, _, _ = student(student_imgs)
+        student_features = None
+        teacher_features = None
+    else:
+        if not isinstance(teacher_imgs, torch.Tensor) or teacher_imgs.ndim < 4:
+            teacher_imgs = student_imgs
+        teacher_imgs = teacher_imgs.to(device)
 
-    # 1) student detections
-    detections, student_features, _ = student(student_imgs)
+        # 1) student detections
+        detections, student_features, _ = student(student_imgs)
 
     # 2) teacher features (for heatmap) if distill is used
     if use_distill and teachers is not None:
@@ -177,8 +215,8 @@ def validate_and_visualize(
     viz_batch = plot_prediction_batch(student_imgs, targets, detections)
     logger.log_images("Qualitative/Predictions", viz_batch, epoch)
 
-    # visualization 2: distillation feature heatmaps
-    if teacher_features is not None and student_features is not None:
+    # visualization 2: distillation feature heatmaps (only for student with distillation)
+    if not is_teacher_detector and teacher_features is not None and student_features is not None:
         heatmap_batch = plot_feature_heatmap(student_features, teacher_features)
         logger.log_images("Qualitative/Distillation_Heatmaps", heatmap_batch, epoch)
 
@@ -194,43 +232,70 @@ def main():
     # experiment name
     if args.run_name is None:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        kd_tag = "KD" if args.distill else "baseline"
-        args.run_name = f"{args.backbone}_{kd_tag}_a{args.alpha}_b{args.beta}_g{args.gamma}_{timestamp}"
+        if args.train_teacher_detector:
+            args.run_name = f"teacher_{args.teacher_type}_{timestamp}"
+        else:
+            kd_tag = "KD" if args.distill else "baseline"
+            args.run_name = f"{args.backbone}_{kd_tag}_a{args.alpha}_b{args.beta}_g{args.gamma}_{timestamp}"
 
     experiment_dir = os.path.join("runs", args.run_name)
+    checkpoint_dir = os.path.join(args.output_dir, args.run_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Starting Experiment: {experiment_dir}")
     logger = ExperimentLogger(log_dir=experiment_dir)
 
     # data
     train_loader, val_loader = get_loaders(batch_size=args.batch_size, input_size=args.input_size)
 
-    # teachers (only if distillation enabled)
-    teachers = TeacherManager(device=device) if args.distill else None
-
-    # student
-    student = StudentDetector(
-        model_type=args.backbone,
-        num_classes=20,
-        teacher_feature_dim=384,
-        use_feature_distill=args.distill,
-        use_logit_distill=args.distill,
-        input_size=args.input_size,
-    ).to(device)
-
-    # optimizer - use higher LR for 1-epoch training if specified
-    effective_lr = args.warmup_lr if args.epochs == 1 else args.lr
-    optimizer = optim.Adam(student.parameters(), lr=effective_lr)
-    print(f"Using learning rate: {effective_lr}")
-
-    # loss
-    if args.distill:
-        criterion = DistillationLoss(alpha=args.alpha, beta=args.beta, gamma=args.gamma)
+    if args.train_teacher_detector:
+        # Train detector with DINO/CLIP backbone
+        print(f"\n===== Training Teacher Detector ({args.teacher_type.upper()}) =====")
+        student = TeacherDetector(
+            teacher_type=args.teacher_type,
+            num_classes=20,
+            freeze_backbone=True,
+            input_size=args.input_size,
+            device=device
+        ).to(device)
+        
+        optimizer = optim.SGD(student.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+        lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+        
+        teachers = None
+        criterion = None
+        use_distill = False
+        is_teacher_detector = True
     else:
-        # feature/logit KD disabled
-        criterion = DistillationLoss(alpha=args.alpha, beta=0.0, gamma=0.0)
+        # Student training with optional distillation
+        print("\n===== Training Student Detector =====")
+        # teachers (only if distillation enabled)
+        teachers = TeacherManager(device=device) if args.distill else None
+
+        # student
+        student = StudentDetector(
+            model_type=args.backbone,
+            num_classes=20,
+            teacher_feature_dim=384,
+            use_feature_distill=args.distill,
+            use_logit_distill=args.distill,
+            input_size=args.input_size,
+        ).to(device)
+
+        # optimizer
+        optimizer = optim.Adam(student.parameters(), lr=args.lr)
+        lr_scheduler = None
+
+        # loss
+        if args.distill:
+            criterion = DistillationLoss(alpha=args.alpha, beta=args.beta, gamma=args.gamma)
+        else:
+            # feature/logit KD disabled
+            criterion = DistillationLoss(alpha=args.alpha, beta=0.0, gamma=0.0)
+        
+        use_distill = args.distill
+        is_teacher_detector = False
 
     # training loop
-
     for epoch in range(args.epochs):
         # Train for one epoch
         train_loss = train_one_epoch(
@@ -242,11 +307,16 @@ def main():
             criterion,
             logger,
             device=device,
-            use_distill=args.distill,
+            use_distill=use_distill,
+            is_teacher_detector=is_teacher_detector,
             debug=args.debug,
         )
 
         print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}")
+        
+        # Update learning rate if scheduler exists
+        if lr_scheduler is not None:
+            lr_scheduler.step()
 
         # Visualizations
         validate_and_visualize(
@@ -256,15 +326,17 @@ def main():
             val_loader,
             logger,
             device=device,
-            use_distill=args.distill,
+            use_distill=use_distill,
+            is_teacher_detector=is_teacher_detector,
         )
 
         # Save checkpoint
-        latest_path = os.path.join(args.output_dir, "student_latest.pth")
+        prefix = "teacher" if is_teacher_detector else "student"
+        latest_path = os.path.join(checkpoint_dir, f"{prefix}_latest.pth")
         torch.save(student.state_dict(), latest_path)
 
         if (epoch + 1) % 5 == 0:
-            ckpt_path = os.path.join(args.output_dir, f"student_epoch_{epoch+1}.pth")
+            ckpt_path = os.path.join(checkpoint_dir, f"{prefix}_epoch_{epoch+1}.pth")
             torch.save(student.state_dict(), ckpt_path)
 
         # ——— VOC mAP evaluation ———
