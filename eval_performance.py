@@ -126,23 +126,8 @@ def main():
         model_name = args.backbone
 
     assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"
-    checkpoint = torch.load(args.checkpoint, map_location=device)
-    
-    # Handle different checkpoint formats and FP16
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-        if checkpoint.get('fp16', False) or args.fp16:
-            print(f"Loading FP16 (half precision) model")
-            model = model.half()
-            model_name += "_fp16"
-    else:
-        state_dict = checkpoint
-        if args.fp16:
-            print(f"Converting model to FP16")
-            model = model.half()
-            model_name += "_fp16"
-    
-    model.load_state_dict(state_dict)
+    state_dict = torch.load(args.checkpoint, map_location=device)
+    model.load_state_dict(state_dict, strict=False)
     print(f"Loaded checkpoint from {args.checkpoint}")
 
     # Model size
