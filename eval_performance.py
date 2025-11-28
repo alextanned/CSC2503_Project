@@ -114,20 +114,53 @@ def main():
         ).to(device)
         model_name = f"teacher_{args.teacher_type}"
     else:
+        # First load checkpoint to check for distillation components
+        assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+        
+        # Check if the checkpoint has distillation components
+        has_distillation = any(k.startswith('projector.') or k.startswith('aux_classifier.') for k in state_dict.keys())
+        
         print(f"Loading student detector ({args.backbone})...")
+        if has_distillation:
+            print("Detected distillation components in checkpoint")
+        
         model = StudentDetector(
             model_type=args.backbone,
             num_classes=20,
             teacher_feature_dim=384,
-            use_feature_distill=False,
-            use_logit_distill=False,
+            use_feature_distill=has_distillation,
+            use_logit_distill=has_distillation,
             input_size=args.input_size,
         ).to(device)
         model_name = args.backbone
 
-    assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"
-    state_dict = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(state_dict, strict=False)
+    # Load checkpoint (already loaded for student models above)
+    if args.eval_teacher_detector:
+        assert os.path.isfile(args.checkpoint), f"Checkpoint not found: {args.checkpoint}"
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+    
+    # Handle FP16
+    if isinstance(checkpoint, dict):
+        if checkpoint.get('fp16', False) or args.fp16:
+            print(f"Loading FP16 (half precision) model")
+            model = model.half()
+            model_name += "_fp16"
+    elif args.fp16:
+        print(f"Converting model to FP16")
+        model = model.half()
+        model_name += "_fp16"
+    
+    model.load_state_dict(state_dict)
     print(f"Loaded checkpoint from {args.checkpoint}")
 
     # Model size
@@ -154,6 +187,19 @@ def main():
     print(f"Tested on {perf_metrics['total_images']} images")
     print(f"{'='*60}\n")
 
+    # mAP evaluation
+    print("Evaluating mAP on validation set...")
+    iou_thresholds = [0.5 + 0.05 * i for i in range(10)]
+    mAPs, overall_map = evaluate(model, val_loader, device=device, iou_thresholds=iou_thresholds)
+
+    print(f"\n{'='*60}")
+    print("VOC mAP RESULTS")
+    print(f"{'='*60}")
+    for iou, ap in mAPs.items():
+        print(f"mAP @ IoU {iou:.2f}: {ap:.4f}")
+    print(f"Overall mAP (0.5:0.95): {overall_map:.4f}")
+    print(f"{'='*60}\n")
+
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY")
@@ -161,6 +207,8 @@ def main():
     print(f"Model: {model_name}")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Parameters: {total_params:,}")
+    print(f"mAP (0.5:0.95): {overall_map:.4f}")
+    print(f"mAP @ 0.5: {mAPs[0.5]:.4f}")
     print(f"Inference Speed: {perf_metrics['avg_time_per_image_ms']:.2f} ms/image ({perf_metrics['fps']:.2f} FPS)")
     print(f"{'='*60}\n")
 

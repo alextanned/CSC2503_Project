@@ -52,20 +52,29 @@ def main():
     
     # Load the trained FP32 model
     print("Loading FP32 model...")
+    
+    # First, try to load checkpoint to check if it has distillation components
+    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+    
+    # Check if the checkpoint has distillation components
+    has_distillation = any(k.startswith('projector.') or k.startswith('aux_classifier.') for k in state_dict.keys())
+    
+    print(f"Checkpoint has distillation components: {has_distillation}")
+    
     model = StudentDetector(
         model_type=args.backbone,
         num_classes=20,  # VOC has 20 classes (background is added internally)
-        use_feature_distill=False,
-        use_logit_distill=False,
+        use_feature_distill=has_distillation,
+        use_logit_distill=has_distillation,
         input_size=args.input_size,
     )
     
-    # Load checkpoint
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        model.load_state_dict(checkpoint)
+    # Load checkpoint weights
+    model.load_state_dict(state_dict)
     
     print("Model loaded successfully!")
     
